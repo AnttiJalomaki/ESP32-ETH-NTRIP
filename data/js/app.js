@@ -1,3 +1,28 @@
+const ECEF_MAX_CM = 700000000;
+const ECEF_STORAGE_UNITS_PER_CM = 100; // Stored as 0.1 mm units.
+const ECEF_RANGE_LABEL = "±7000 km (±700,000,000 cm)";
+
+function storedEcefToCm(value) {
+    const parsed = Number(value);
+    return Number.isFinite(parsed) ? parsed / ECEF_STORAGE_UNITS_PER_CM : "";
+}
+
+function ecefCmToStored(value) {
+    return Math.round(value * ECEF_STORAGE_UNITS_PER_CM).toString();
+}
+
+function validateEcefCoordinate(axis, value) {
+    if (!Number.isFinite(value)) {
+        return `ECEF ${axis} coordinate must be a number in centimeters`;
+    }
+
+    if (Math.abs(value) > ECEF_MAX_CM) {
+        return `ECEF ${axis} coordinate must be within ${ECEF_RANGE_LABEL}`;
+    }
+
+    return null;
+}
+
     document.getElementById("startSurveyBtn").addEventListener("click", function() {
         const surveyTime = document.getElementById("surveyTimeInput").value;
         const surveyAccuracy = document.getElementById("surveyAccuracyInput").value;
@@ -474,16 +499,13 @@ function updateFormValues(data) {
         
         // Update ECEF coordinates
         if (data.ecefX !== undefined) {
-            const ecefX = parseFloat(data.ecefX) / 100;
-            safeSetValue('ecefX', ecefX);
+            safeSetValue('ecefX', storedEcefToCm(data.ecefX));
         }
         if (data.ecefY !== undefined) {
-            const ecefY = parseFloat(data.ecefY) / 100;
-            safeSetValue('ecefY', ecefY);
+            safeSetValue('ecefY', storedEcefToCm(data.ecefY));
         }
         if (data.ecefZ !== undefined) {
-            const ecefZ = parseFloat(data.ecefZ) / 100;
-            safeSetValue('ecefZ', ecefZ);
+            safeSetValue('ecefZ', storedEcefToCm(data.ecefZ));
         }
         
         // Update field states based on enable settings
@@ -538,20 +560,18 @@ function validateFormInputs() {
         errors.push('Secondary username must be 15 characters or less');
     }
 
-    // Validate ECEF coordinates (±7000 km = ±700000 cm)
+    // Validate ECEF coordinates (±7000 km = ±700,000,000 cm)
     const ecefX = parseFloat(document.getElementById('ecefX').value);
     const ecefY = parseFloat(document.getElementById('ecefY').value);
     const ecefZ = parseFloat(document.getElementById('ecefZ').value);
 
-    if (Math.abs(ecefX) > 700000) {
-        errors.push('ECEF X coordinate must be within ±7000 km (±700000 cm)');
-    }
-    if (Math.abs(ecefY) > 700000) {
-        errors.push('ECEF Y coordinate must be within ±7000 km (±700000 cm)');
-    }
-    if (Math.abs(ecefZ) > 700000) {
-        errors.push('ECEF Z coordinate must be within ±7000 km (±700000 cm)');
-    }
+    const ecefXError = validateEcefCoordinate('X', ecefX);
+    const ecefYError = validateEcefCoordinate('Y', ecefY);
+    const ecefZError = validateEcefCoordinate('Z', ecefZ);
+
+    if (ecefXError) errors.push(ecefXError);
+    if (ecefYError) errors.push(ecefYError);
+    if (ecefZError) errors.push(ecefZError);
 
     return errors;
 }
@@ -585,15 +605,15 @@ document.querySelector('.settings-form').addEventListener('submit', function(e) 
     formData.append('enableCaster2', document.getElementById('enableCaster2').checked ? 'on' : '');
     formData.append('rtcmChk', document.getElementById('enableRtcmChecks').checked ? 'on' : '');
     
-    // Add ECEF coordinates - convert from centimeters with 0.1mm precision to 0.1mm precision integers
-    // Format: -1234.5678 cm should be sent as -12345678 (0.1mm units)
+    // Add ECEF coordinates - convert from centimeters to 0.1 mm precision integers.
+    // Format: -1234.56 cm is sent as -123456 (0.1 mm units).
     const ecefX = parseFloat(document.getElementById('ecefX').value);
     const ecefY = parseFloat(document.getElementById('ecefY').value);
     const ecefZ = parseFloat(document.getElementById('ecefZ').value);
     
-    formData.append('ecefX', Math.round(ecefX * 100).toString());
-    formData.append('ecefY', Math.round(ecefY * 100).toString());
-    formData.append('ecefZ', Math.round(ecefZ * 100).toString());
+    formData.append('ecefX', ecefCmToStored(ecefX));
+    formData.append('ecefY', ecefCmToStored(ecefY));
+    formData.append('ecefZ', ecefCmToStored(ecefZ));
     
     // Add primary caster fields if enabled
     if (document.getElementById('enableCaster1').checked) {
@@ -749,5 +769,4 @@ function initOtaUpdate() {
         });
     }
 }
-
 
