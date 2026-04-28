@@ -207,6 +207,12 @@ bool stopNTRIP(WiFiClient& client, bool isPrimary)
 {
     debug(isPrimary ? "Disconnecting primary NTRIP..." : "Disconnecting secondary NTRIP...");
 
+    NTRIPStatus& status = isPrimary ? NtripPrimaryStatus : NtripSecondaryStatus;
+    if (status.connected && status.protocolVersion == 2 && client.connected()) {
+        client.write("0\r\n\r\n", 5);
+        client.flush();
+    }
+
     client.stop();
     infof("NTRIP %s - Disconnected", isPrimary ? "Primary" : "Secondary");
     
@@ -470,6 +476,8 @@ bool checkAndConnect(WiFiClient& client, NTRIPStatus& status, const bool isPrima
                 "User-Agent: NTRIP %s/App Version %s\r\n"
                 "Authorization: Basic %s\r\n"
                 "Ntrip-Version: Ntrip/2.0\r\n"
+                "Transfer-Encoding: chunked\r\n"
+                "Content-Type: gnss/data\r\n"
                 "Connection: close\r\n\r\n",
                 mnt, host,
                 settings["ntrip_sName"].as<const char*>(),

@@ -198,6 +198,28 @@ void test_invalid_length_rejected(void) {
     TEST_ASSERT_EQUAL_INT(0, (int)forwarded.size());
 }
 
+void test_resync_after_reserved_header_bits(void) {
+    uint8_t bad_header[] = {0xD3, 0xFC, 0x06};  // Reserved high bits in byte 1 must be zero
+    for (auto b : bad_header) rtcmbuffer::process_byte(b, mock_forward_func);
+
+    auto frame = build_rtcm(1005, nullptr, 6);
+    feed(frame);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, (int)forwarded.size(), "parser did not resync after invalid reserved header bits");
+    TEST_ASSERT_EQUAL_INT((int)frame.size(), (int)forwarded[0].data.size());
+}
+
+void test_resync_after_too_short_payload_length(void) {
+    uint8_t bad_header[] = {0xD3, 0x00, 0x01};  // RTCM3 payload must contain at least the 12-bit message type
+    for (auto b : bad_header) rtcmbuffer::process_byte(b, mock_forward_func);
+
+    auto frame = build_rtcm(1005, nullptr, 6);
+    feed(frame);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, (int)forwarded.size(), "parser did not resync after too-short RTCM payload");
+    TEST_ASSERT_EQUAL_INT((int)frame.size(), (int)forwarded[0].data.size());
+}
+
 int main(int argc, char **argv) {
     UNITY_BEGIN();
 
@@ -216,6 +238,8 @@ int main(int argc, char **argv) {
 
     RUN_TEST(test_buffer_overflow_protection);
     RUN_TEST(test_invalid_length_rejected);
+    RUN_TEST(test_resync_after_reserved_header_bits);
+    RUN_TEST(test_resync_after_too_short_payload_length);
 
     return UNITY_END();
 }

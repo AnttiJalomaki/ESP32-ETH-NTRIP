@@ -89,6 +89,10 @@ int parse_rtcm_length(uint8_t *buf) {
     return ((buf[1] & 0x03) << 8) | buf[2];
 }
 
+bool is_valid_rtcm_header(const uint8_t *buf) {
+    return buf[0] == 0xD3 && (buf[1] & 0xFC) == 0;
+}
+
 int get_rtcm_message_type(const uint8_t *payload) {
     return (payload[0] << 4) | (payload[1] >> 4);
 }
@@ -136,8 +140,8 @@ void reset_buffer() {
 // 5. RESET: Clear buffer and return to IDLE
 //
 // Length Encoding: 10-bit value split across bytes 1-2
-//   byte1: [reserved(2)] [length(8 MSB)]
-//   byte2: [length(2 LSB)] [reserved(6)]
+//   byte1: [reserved(6)] [length(2 MSB)]
+//   byte2: [length(8 LSB)]
 //
 // CRC24: Computed over header + payload (bytes 0 to N+2), stored in bytes N+3 to N+5
 void process_byte(uint8_t byte, void (*forward_func)(const uint8_t *, int)){
@@ -171,10 +175,16 @@ void process_byte(uint8_t byte, void (*forward_func)(const uint8_t *, int)){
 
     // STATE 2: HEADER COMPLETE (after 3 bytes) - Parse message length
     if (rtcm_index == 3) {
+        if (!is_valid_rtcm_header(rtcm_buffer)) {
+            error("RTCM header error - discarding message");
+            reset_buffer();
+            return;
+        }
+
         rtcm_length = parse_rtcm_length(rtcm_buffer);
 
-        // Validate length (RTCM 3.x spec: max 1023 bytes payload)
-        if (rtcm_length > 1023) {
+        // Validate length. Payload must contain at least the 12-bit message type.
+        if (rtcm_length < 2 || rtcm_length > 1023) {
             error("RTCM length error - discarding message");
             reset_buffer();
             return;

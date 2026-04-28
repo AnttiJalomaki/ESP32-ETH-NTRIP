@@ -89,6 +89,10 @@ int parse_rtcm_length(uint8_t *buf) {
     return ((buf[1] & 0x03) << 8) | buf[2];
 }
 
+bool is_valid_rtcm_header(const uint8_t *buf) {
+    return buf[0] == 0xD3 && (buf[1] & 0xFC) == 0;
+}
+
 int get_rtcm_message_type(const uint8_t *payload) {
     return (payload[0] << 4) | (payload[1] >> 4);
 }
@@ -150,9 +154,14 @@ void process_byte(uint8_t byte, void (*forward_func)(const uint8_t *, int)){
     rtcm_index++;
 
     if (rtcm_index == 3) {
+        if (!is_valid_rtcm_header(rtcm_buffer)) {
+            error("RTCM header error - discarding message");
+            reset_buffer();
+            return;
+        }
+
         rtcm_length = parse_rtcm_length(rtcm_buffer);
-        // Only log errors, not every message length
-        if (rtcm_length > 1023) {
+        if (rtcm_length < 2 || rtcm_length > 1023) {
             error("RTCM length error - discarding message");
             reset_buffer();
             return;
