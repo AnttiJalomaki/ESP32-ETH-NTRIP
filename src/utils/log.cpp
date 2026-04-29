@@ -11,6 +11,50 @@ int prevPosition = 0;
 // UDP stream instance
 static UDPStream* udpStream = nullptr;
 
+String escapeJsonString(const String& input) {
+    String output;
+    output.reserve(input.length() + 8);
+
+    for (unsigned int i = 0; i < input.length(); i++) {
+        const uint8_t c = static_cast<uint8_t>(input.charAt(i));
+
+        switch (c) {
+            case '"':
+                output += "\\\"";
+                break;
+            case '\\':
+                output += "\\\\";
+                break;
+            case '\b':
+                output += "\\b";
+                break;
+            case '\f':
+                output += "\\f";
+                break;
+            case '\n':
+                output += "\\n";
+                break;
+            case '\r':
+                output += "\\r";
+                break;
+            case '\t':
+                output += "\\t";
+                break;
+            default:
+                if (c < 0x20) {
+                    char escaped[7];
+                    snprintf(escaped, sizeof(escaped), "\\u%04X", c);
+                    output += escaped;
+                } else {
+                    output += static_cast<char>(c);
+                }
+                break;
+        }
+    }
+
+    return output;
+}
+
 // Helper function to get log level string
 String getLevelString(LogLevel level) {
     switch(level) {
@@ -58,7 +102,7 @@ void addToLog(const String& input, LogLevel level)
     // Only add to web log if level is INFO or higher
     if (level >= LogLevel::INFO) {
         // Create timestamped log entry
-        const String msg = "[\"" + String(millis()) + "\",\"" + formattedMessage + "\"]";
+        const String msg = "[\"" + String(millis()) + "\",\"" + escapeJsonString(formattedMessage) + "\"]";
 
         if (prevPosition == LOG_SIZE - 1)
         {
