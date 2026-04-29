@@ -34,20 +34,18 @@
 #define STATIC_SN 255, 255, 255, 0
 #define STATIC_DNS 8, 8, 8, 8
 
-#define FIRMWARE_VERSION "0.43.2"  // Update this when you release new versions
+#define FIRMWARE_VERSION "0.43.3"  // Update this when you release new versions
 #define BUILD_DATE __DATE__ " " __TIME__
 
 // Task Priorities
-#define GPS_STATUS_TASK_PRIORITY configMAX_PRIORITIES - 3 //     = 22
-#define GPS_UART_CHECK_TASK_PRIORITY configMAX_PRIORITIES - 2 // = 23
+#define GPS_SERVICE_TASK_PRIORITY configMAX_PRIORITIES - 2 //     = 23
 #define NTRIP_TASK_PRIORITY 1 //                                 =  1
 #define WEB_SERVER_TASK_PRIORITY 10 //                           = 10
 // AsyncTCP task priority                                        =  3
 // W6100 task priority (rx)                                      =  1
 
 // Task Stack Sizes (bytes)
-#define GPS_STATUS_TASK_STACK 4096       // Stack for GPS status monitoring task
-#define GPS_UART_CHECK_TASK_STACK 10000  // Stack for GPS UART check task (high-frequency RTCM processing)
+#define GPS_SERVICE_TASK_STACK 12000     // Stack for GPS UART parsing, status, and queued commands
 #define NTRIP_TASK_STACK 8192            // Stack for NTRIP client task
 #define WEB_SERVER_TASK_STACK 8192       // Stack for web server task
 
@@ -64,6 +62,7 @@
 // GPS Constants
 #define GPS_SELECTED_BAUD 460800        // Selected baud rate for GPS communication
 #define GPS_BAUD_TEST_COUNT 4           // Number of baud rates to test during initialization
+#define GPS_COMMAND_QUEUE_LENGTH 4      // Queued GPS control commands from web/API tasks
 
 // Buffer Sizes
 #define NTRIP_SERVER_BUFFER_SIZE 1024   // Buffer size for NTRIP server requests

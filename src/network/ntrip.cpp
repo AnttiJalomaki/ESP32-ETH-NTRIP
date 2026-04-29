@@ -293,7 +293,7 @@ NTRIPError RTCMCheck() {
     }
 
     // Don't allow connection during survey mode
-    if (currentGPSStatus.surveyInActive) {
+    if (isSurveyInActive()) {
         debugf("NTRIP - Survey in active, not connecting");
         return NTRIPError::SURVEY_IN_ACTIVE;
     }

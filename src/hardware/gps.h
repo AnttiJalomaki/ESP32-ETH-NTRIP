@@ -29,18 +29,13 @@ struct GPSStatusStruct {
   uint16_t satellites = 0; // satellites in view
   GPSMode gpsMode = GPSMode::UNKNOWN; // 0: rover, 1: survey-in, 2: static
   const char *gpsModeString = nullptr; // "rover", "survey-in", or "static"
-  // Survey parameters
-  uint16_t requestedSurveyTime = 0;
-  float requestedSurveyAccuracy = 0.0f;
 };
 
 extern bool gpsConnected;
 
-extern SFE_UBLOX_GNSS myGNSS;
-
-extern GPSStatusStruct currentGPSStatus; // Declare currentGPSStatus as an external variable
-
 bool initializeGPS();
-void stopSurveyMode();
+GPSStatusStruct getGPSStatusSnapshot();
+bool isSurveyInActive();
+bool requestStartSurveyMode(uint16_t observationTime, float requiredAccuracy);
+bool requestStopSurveyMode();
 String getSurveyStatus();
-bool saveSurveyPosition();

@@ -152,22 +152,29 @@ void initializeWebServer()
               });
     // Start Survey-in mode
     server.on("/startSurvey", HTTP_GET, []() {
+        uint16_t observationTime = 0;
+        float requiredAccuracy = 0.0f;
+
         // Check if time parameter is provided
         if (server.hasArg("time")) {
             auto time = server.arg("time");
-            currentGPSStatus.requestedSurveyTime = time.toInt();
+            observationTime = time.toInt();
         }
 
         // Check if accuracy parameter is provided
         if (server.hasArg("accuracy")) {
             auto accuracy = server.arg("accuracy");
-            currentGPSStatus.requestedSurveyAccuracy = accuracy.toFloat();
+            requiredAccuracy = accuracy.toFloat();
         }
 
         infof("Survey-in parameters set: %d seconds, %.2f meters",
-              currentGPSStatus.requestedSurveyTime,
-              currentGPSStatus.requestedSurveyAccuracy);
-        server.send(200, "text/plain", "Survey parameters saved");
+              observationTime,
+              requiredAccuracy);
+        if (requestStartSurveyMode(observationTime, requiredAccuracy)) {
+            server.send(200, "text/plain", "Survey start queued");
+        } else {
+            server.send(503, "text/plain", "Failed to queue survey start");
+        }
     });
 
     server.on("/status", HTTP_GET, []()
@@ -202,22 +209,24 @@ void initializeWebServer()
                       status["ntripUptime2"] = calculateUptime(currentMillis - NtripSecondaryStatus.connectionOpenedAt);
                   }
 
+                  GPSStatusStruct gpsStatus = getGPSStatusSnapshot();
+
                   // Rest of the status fields...
-                  status["gpsStatusString"] = currentGPSStatus.status_message;
-                  status["gpsLatitude"] = serialized(String(currentGPSStatus.latitude, 9));
-                  status["gpsLongitude"] = serialized(String(currentGPSStatus.longitude, 9));
-                  status["gpsAltitude"] = currentGPSStatus.altitude;
-                  status["gpsSiv"] = currentGPSStatus.satellites;
-                  status["gpsConnected"] = currentGPSStatus.gpsConnected;
-                  status["surveyInActive"] = currentGPSStatus.surveyInActive;
-                  status["surveyInObservationTime"] = currentGPSStatus.surveyInObservationTime;
-                  status["surveyInValid"] = currentGPSStatus.surveyInValid;
-                  status["surveyInMeanAccuracy"] = currentGPSStatus.surveyInMeanAccuracy;
-                  status["gpsCurrentTime"] = currentGPSStatus.gpsCurrentTime;
-                  status["x"] = currentGPSStatus.x;
-                  status["y"] = currentGPSStatus.y;
-                  status["z"] = currentGPSStatus.z;
-                  status["gpsMode"] = currentGPSStatus.gpsModeString;
+                  status["gpsStatusString"] = gpsStatus.status_message;
+                  status["gpsLatitude"] = serialized(String(gpsStatus.latitude, 9));
+                  status["gpsLongitude"] = serialized(String(gpsStatus.longitude, 9));
+                  status["gpsAltitude"] = gpsStatus.altitude;
+                  status["gpsSiv"] = gpsStatus.satellites;
+                  status["gpsConnected"] = gpsStatus.gpsConnected;
+                  status["surveyInActive"] = gpsStatus.surveyInActive;
+                  status["surveyInObservationTime"] = gpsStatus.surveyInObservationTime;
+                  status["surveyInValid"] = gpsStatus.surveyInValid;
+                  status["surveyInMeanAccuracy"] = gpsStatus.surveyInMeanAccuracy;
+                  status["gpsCurrentTime"] = gpsStatus.gpsCurrentTime;
+                  status["x"] = gpsStatus.x;
+                  status["y"] = gpsStatus.y;
+                  status["z"] = gpsStatus.z;
+                  status["gpsMode"] = gpsStatus.gpsModeString;
 
                   serializeJson(status, message);
                   server.send(200, "application/json", message);
@@ -253,9 +262,11 @@ void initializeWebServer()
     });
 
     server.on("/stopSurvey", HTTP_GET, []() {
-        stopSurveyMode();  // Implement this function to stop the survey
-        info("Survey stopped");
-        server.send(200, "text/plain", "Survey stopped");
+        if (requestStopSurveyMode()) {
+            server.send(200, "text/plain", "Survey stop queued");
+        } else {
+            server.send(503, "text/plain", "Failed to queue survey stop");
+        }
     });
 
     server.on("/update", HTTP_GET, handleUpdateRequest);

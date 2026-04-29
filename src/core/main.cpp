@@ -83,18 +83,13 @@ void loop()
         debug("System Uptime: " + getUptimeString());
 
         // Monitor stack usage for all tasks (watermark = minimum free stack ever reached)
-        TaskHandle_t gpsStatusTaskHandle = xTaskGetHandle("gpsStatusTask");
-        TaskHandle_t gpsUartTaskHandle = xTaskGetHandle("gpsUartTask");
+        TaskHandle_t gpsServiceTaskHandle = xTaskGetHandle("gpsServiceTask");
         TaskHandle_t ntripTaskHandle = xTaskGetHandle("NTRIPTask");
         TaskHandle_t webServerTaskHandle = xTaskGetHandle("WebServerTask");
 
-        if (gpsStatusTaskHandle) {
-            UBaseType_t watermark = uxTaskGetStackHighWaterMark(gpsStatusTaskHandle);
-            debugf("Stack watermark - gpsStatusTask: %u bytes free (configured: %u)", watermark, GPS_STATUS_TASK_STACK);
-        }
-        if (gpsUartTaskHandle) {
-            UBaseType_t watermark = uxTaskGetStackHighWaterMark(gpsUartTaskHandle);
-            debugf("Stack watermark - gpsUartTask: %u bytes free (configured: %u)", watermark, GPS_UART_CHECK_TASK_STACK);
+        if (gpsServiceTaskHandle) {
+            UBaseType_t watermark = uxTaskGetStackHighWaterMark(gpsServiceTaskHandle);
+            debugf("Stack watermark - gpsServiceTask: %u bytes free (configured: %u)", watermark, GPS_SERVICE_TASK_STACK);
         }
         if (ntripTaskHandle) {
             UBaseType_t watermark = uxTaskGetStackHighWaterMark(ntripTaskHandle);

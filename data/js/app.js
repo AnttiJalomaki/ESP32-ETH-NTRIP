@@ -1,6 +1,7 @@
 const ECEF_MAX_CM = 700000000;
 const ECEF_STORAGE_UNITS_PER_CM = 100; // Stored as 0.1 mm units.
 const ECEF_RANGE_LABEL = "±7000 km (±700,000,000 cm)";
+const RECENT_EVENT_LIMIT = 8;
 
 function storedEcefToCm(value) {
     const parsed = Number(value);
@@ -21,6 +22,20 @@ function validateEcefCoordinate(axis, value) {
     }
 
     return null;
+}
+
+function getLogLevel(logText) {
+    if (logText.includes("[ERROR]")) return "error";
+    if (logText.includes("[WARNING]")) return "warning";
+    if (logText.includes("[INFO]")) return "info";
+    if (logText.includes("[DEBUG]")) return "debug";
+    return "info";
+}
+
+function formatLogTime(serverTimestamp, logMillis, options) {
+    const currentTime = Date.now();
+    const absoluteLogTime = new Date(currentTime - (serverTimestamp - logMillis));
+    return absoluteLogTime.toLocaleString(undefined, options);
 }
 
     document.getElementById("startSurveyBtn").addEventListener("click", function() {
@@ -210,41 +225,43 @@ function updateLogs() {
         if (this.readyState === 4 && this.status === 200) {
             let json = JSON.parse(this.responseText);
             const logTable = document.getElementById('logTable');
+            const recentEvents = document.getElementById('recentEvents');
+            const eventsUpdatedAt = document.getElementById('eventsUpdatedAt');
             const serverTimestamp = json.timestamp;
-            const currentTime = Date.now();
+            const dateTimeOptions = {
+                year: 'numeric',
+                month: 'short',
+                day: 'numeric',
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            };
+            const timeOnlyOptions = {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit'
+            };
+            const validLogs = (json.log || []).filter(logEntry =>
+                Array.isArray(logEntry) && logEntry.length === 2
+            );
 
             // Clear existing rows
             while (logTable.firstChild) {
                 logTable.removeChild(logTable.firstChild);
             }
 
-            json.log.forEach(logEntry => {
-                if (!Array.isArray(logEntry) || logEntry.length !== 2) return; // Skip invalid entries
-                
+            while (recentEvents && recentEvents.firstChild) {
+                recentEvents.removeChild(recentEvents.firstChild);
+            }
+
+            validLogs.forEach(logEntry => {
                 const logMillis = parseInt(logEntry[0]);
                 const logText = logEntry[1];
-                
-                // Calculate time difference between now and server timestamp
-                const timeOffset = currentTime - serverTimestamp;
-                
-                // Convert log millis to absolute time by adding the offset
-                // Current time - (current server time - log time)
-                const absoluteLogTime = new Date(currentTime - (serverTimestamp - logMillis));
-                
-                // Format with date and time
-                const options = { 
-                    year: 'numeric', 
-                    month: 'short', 
-                    day: 'numeric',
-                    hour: '2-digit', 
-                    minute: '2-digit', 
-                    second: '2-digit'
-                };
-                const formattedDateTime = absoluteLogTime.toLocaleString(undefined, options);
+                const level = getLogLevel(logText);
+                const formattedDateTime = formatLogTime(serverTimestamp, logMillis, dateTimeOptions);
                 
                 const row = document.createElement('tr');
-                row.className = logText.includes("ERR") ? "log-error" : 
-                              logText.includes("INF") ? "log-info" : "";
+                row.className = `log-${level}`;
 
                 const timeCell = document.createElement('td');
                 timeCell.textContent = formattedDateTime;
@@ -256,6 +273,41 @@ function updateLogs() {
                 row.appendChild(infoCell);
                 logTable.appendChild(row);
             });
+
+            if (recentEvents) {
+                const newestLogs = validLogs.slice(-RECENT_EVENT_LIMIT).reverse();
+                if (newestLogs.length === 0) {
+                    const item = document.createElement('li');
+                    item.className = 'event-empty';
+                    item.textContent = 'No events yet';
+                    recentEvents.appendChild(item);
+                } else {
+                    newestLogs.forEach(logEntry => {
+                        const logMillis = parseInt(logEntry[0]);
+                        const logText = logEntry[1];
+                        const level = getLogLevel(logText);
+
+                        const item = document.createElement('li');
+                        item.className = `event-item event-${level}`;
+
+                        const time = document.createElement('span');
+                        time.className = 'event-time';
+                        time.textContent = formatLogTime(serverTimestamp, logMillis, timeOnlyOptions);
+
+                        const message = document.createElement('span');
+                        message.className = 'event-message';
+                        message.textContent = logText;
+
+                        item.appendChild(time);
+                        item.appendChild(message);
+                        recentEvents.appendChild(item);
+                    });
+                }
+            }
+
+            if (eventsUpdatedAt) {
+                eventsUpdatedAt.textContent = `Updated ${new Date().toLocaleTimeString()}`;
+            }
         }
     };
     xhttp.open("GET", "/log", true);
@@ -277,7 +329,7 @@ function indexStart() {
     setInterval(updateStatus, 5000);
     
     // Update logs every 5 seconds
-    setInterval(updateLogs, 9950);
+    setInterval(updateLogs, 5000);
 }
 
 function showLoadingError(message) {
@@ -769,4 +821,3 @@ function initOtaUpdate() {
         });
     }
 }
-

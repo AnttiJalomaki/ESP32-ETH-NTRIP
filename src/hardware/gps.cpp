@@ -15,50 +15,60 @@ constexpr int selected_baud = GPS_SELECTED_BAUD;
 
 bool gpsConnected = false;
 unsigned long gpsInitTime;
-String gpsStatusSting;
 
 GPSStatusStruct currentGPSStatus;
+static GPSStatusStruct gpsStatusOwned;
 
-GPSMode getGpsMode();
+enum class GPSCommandType : uint8_t {
+    START_SURVEY,
+    STOP_SURVEY,
+};
 
-[[noreturn]] void gpsStatusTask(void *pvParameters);
-[[noreturn]] void gps_uart_check_task(void *pvParameters);
+struct GPSCommand {
+    GPSCommandType type;
+    uint16_t observationTime;
+    float requiredAccuracy;
+};
+
+static QueueHandle_t gps_command_queue = NULL;
+static portMUX_TYPE gps_status_mux = portMUX_INITIALIZER_UNLOCKED;
+
+GPSMode readGpsMode();
+const char *gpsStatusString(const GPSStatusStruct &currentGPSStatus_);
+void publishGPSStatus();
+bool updateGPSStatus();
+void processGPSCommands();
+bool processGPSUart();
+bool executeStartSurveyMode(uint16_t observationTime, float requiredAccuracy);
+void executeStopSurveyMode();
+bool saveSurveyPosition();
+
+[[noreturn]] void gpsServiceTask(void *pvParameters);
 
 bool prev_survey_in_active = false;
+bool survey_save_armed = false;
 
-// GPS Task Synchronization: fast_uart_handle controls UART polling frequency
+// GPS service ownership:
 //
-// The GPS module uses two FreeRTOS tasks that need to coordinate:
-// 1. gpsStatusTask: Updates GPS status every 1 second (slow)
-// 2. gps_uart_check_task: Processes incoming RTCM data from GPS UART (fast)
+// After startup configuration, gpsServiceTask is the sole runtime owner of
+// myGNSS and Serial1. It continuously parses UART data, periodically publishes
+// cached status, and executes queued control commands from the web/API layer.
 //
-// Problem: myGNSS.checkUblox() and other GPS operations (getSurveyMode, etc.)
-// cannot run concurrently - they're not thread-safe and share the same UART.
-//
-// Solution: gps_uart_check_task is the normal owner of stream parsing, while
-// status/configuration code uses a recursive mutex before touching myGNSS.
-// fast_uart_handle is still used to pause high-frequency UART polling during
-// explicit GPS configuration or survey operations.
-//
-// This prevents race conditions where status queries would corrupt RTCM data
-// stream or vice versa. The flag is toggled around GPS configuration operations.
-volatile bool fast_uart_handle = false;
-SemaphoreHandle_t gnss_mutex = NULL;
-
-void disable_fast_uart();
-void enable_fast_uart();
+// Other tasks read currentGPSStatus snapshots or enqueue commands. They do not
+// call SparkFun GNSS methods directly, avoiding concurrent access to the
+// non-thread-safe parser and UART.
 bool configureGPS();
-bool updateGPSStatus();
-bool init_gnss_mutex();
-bool lock_gnss(TickType_t timeout_ticks = portMAX_DELAY);
-void unlock_gnss();
 
 bool initializeGPS() {
-    if (!init_gnss_mutex()) {
+    if (gps_command_queue == NULL) {
+        gps_command_queue = xQueueCreate(GPS_COMMAND_QUEUE_LENGTH, sizeof(GPSCommand));
+    }
+
+    if (gps_command_queue == NULL) {
+        error("GPS - Failed to create command queue.");
         return false;
     }
 
-    disable_fast_uart();
     bool resp = false;
     debug("Initializing GPS...");
     for (const int test_baud : test_bauds) {
@@ -83,10 +93,14 @@ bool initializeGPS() {
     if (gpsConnected) {
         gpsInitTime = millis();
     }
-    // Start GPS tasks with centralized stack sizes
-    xTaskCreate(gps_uart_check_task, "gpsUartTask", GPS_UART_CHECK_TASK_STACK, nullptr, GPS_UART_CHECK_TASK_PRIORITY, nullptr);
-    delay(1000);
-    xTaskCreate(gpsStatusTask, "gpsStatusTask", GPS_STATUS_TASK_STACK, nullptr, GPS_STATUS_TASK_PRIORITY, nullptr);
+
+    gpsStatusOwned.gpsConnected = gpsConnected;
+    gpsStatusOwned.status_message = gpsConnected ? "Connected" : "Disconnected";
+    gpsStatusOwned.gpsModeString = gpsStatusString(gpsStatusOwned);
+    publishGPSStatus();
+
+    // Start the single runtime owner for UART parsing, status, and GPS commands.
+    xTaskCreate(gpsServiceTask, "gpsServiceTask", GPS_SERVICE_TASK_STACK, nullptr, GPS_SERVICE_TASK_PRIORITY, nullptr);
     return true;
 }
 
@@ -188,11 +202,10 @@ bool configureGPS() {
     if (response == false) {
         error("GPS - Failed to set GPS mode.");
     } else {
-        debug("GPS - Module configuration complete");
+        info("GPS - Module configuration complete");
         result = true;
     }
-    currentGPSStatus.gpsMode = getGpsMode(); //sets fast uart_handle to false
-    enable_fast_uart();
+    gpsStatusOwned.gpsMode = readGpsMode();
 
     return result;
 }
@@ -204,18 +217,9 @@ String appendLeadingZero(int input) {
     return String(input);
 }
 
-// Function to start Survey-in mode
-bool startSurveyMode(uint16_t observationTime, float requiredAccuracy) {
-    disable_fast_uart();
+bool executeStartSurveyMode(uint16_t observationTime, float requiredAccuracy) {
     if (!gpsConnected) {
         error("GPS - Not connected.");
-        enable_fast_uart();
-        return false;
-    }
-
-    if (!lock_gnss()) {
-        error("GPS - Failed to lock GNSS for survey start.");
-        enable_fast_uart();
         return false;
     }
 
@@ -223,9 +227,7 @@ bool startSurveyMode(uint16_t observationTime, float requiredAccuracy) {
     // response = myGNSS.setSurveyMode(0, 0, 0);  // Disable survey mode
     if (response == false) {
         error("GPS - Failed to stop Survey-in mode.");
-        currentGPSStatus.gpsMode = getGpsMode();
-        unlock_gnss();
-        enable_fast_uart();
+        gpsStatusOwned.gpsMode = readGpsMode();
         return false;
     }
 
@@ -237,26 +239,21 @@ bool startSurveyMode(uint16_t observationTime, float requiredAccuracy) {
     // accuracy
     if (response == false) {
         error("GPS - Failed to set Survey-in mode.");
-        currentGPSStatus.gpsMode = getGpsMode();
-        unlock_gnss();
-        enable_fast_uart();
+        gpsStatusOwned.gpsMode = readGpsMode();
+        gpsStatusOwned.gpsModeString = gpsStatusString(gpsStatusOwned);
+        publishGPSStatus();
         return false;
     }
     info("GPS - Survey-in mode started.");
-    currentGPSStatus.gpsMode = getGpsMode();
-    unlock_gnss();
+    survey_save_armed = true;
+    gpsStatusOwned.gpsMode = readGpsMode();
+    gpsStatusOwned.gpsModeString = gpsStatusString(gpsStatusOwned);
+    publishGPSStatus();
     return true;
 }
 
-void stopSurveyMode() {
+void executeStopSurveyMode() {
     info("GPS - Stopping Survey-in mode...");
-    disable_fast_uart();
-
-    if (!lock_gnss()) {
-        error("GPS - Failed to lock GNSS for survey stop.");
-        enable_fast_uart();
-        return;
-    }
 
     // Set ZED-F9P to Survey-in mode
     bool resp = myGNSS.setSurveyMode(0, 0, 0);  // Minimum 600s (10 min) and 2.0m
@@ -267,20 +264,13 @@ void stopSurveyMode() {
     } else {
         info("GPS - Survey-in mode stopped.");
     }
-    currentGPSStatus.gpsMode = getGpsMode();
-    unlock_gnss();
-    enable_fast_uart();
+    survey_save_armed = false;
+    gpsStatusOwned.gpsMode = readGpsMode();
+    gpsStatusOwned.gpsModeString = gpsStatusString(gpsStatusOwned);
+    publishGPSStatus();
 }
 
 bool saveSurveyPosition() {
-    disable_fast_uart();
-
-    if (!lock_gnss()) {
-        error("GPS - Failed to lock GNSS for survey save.");
-        enable_fast_uart();
-        return false;
-    }
-
     if (myGNSS.getSurveyInValid()) {
         const int64_t x = static_cast<int64_t>(myGNSS.getHighResECEFX()) * 100 + myGNSS.getHighResECEFXHp();
         const int64_t y = static_cast<int64_t>(myGNSS.getHighResECEFY()) * 100 + myGNSS.getHighResECEFYHp();
@@ -305,17 +295,15 @@ bool saveSurveyPosition() {
         } else {
             info("GPS - Static position set.");
         }
-        currentGPSStatus.gpsMode = getGpsMode();
-        unlock_gnss();
-        enable_fast_uart();
+        gpsStatusOwned.gpsMode = readGpsMode();
+        gpsStatusOwned.gpsModeString = gpsStatusString(gpsStatusOwned);
+        publishGPSStatus();
         return true;
     }
-    unlock_gnss();
-    enable_fast_uart();
     return false;
 }
 
-String gpsStatusString(const GPSStatusStruct &currentGPSStatus_) {
+const char *gpsStatusString(const GPSStatusStruct &currentGPSStatus_) {
     switch (currentGPSStatus_.gpsMode) {
         case GPSMode::ROVER:
             return "Rover mode";
@@ -329,177 +317,174 @@ String gpsStatusString(const GPSStatusStruct &currentGPSStatus_) {
     }
 }
 
-bool updateGPSStatus() {
-    // Check if survey parameters are set and start survey mode if needed
-    if (currentGPSStatus.requestedSurveyTime > 0 && currentGPSStatus.requestedSurveyAccuracy > 0) {
-        uint16_t observationTime = currentGPSStatus.requestedSurveyTime;
-        float requiredAccuracy = currentGPSStatus.requestedSurveyAccuracy;
+void publishGPSStatus() {
+    portENTER_CRITICAL(&gps_status_mux);
+    currentGPSStatus = gpsStatusOwned;
+    portEXIT_CRITICAL(&gps_status_mux);
+}
 
-        // Clear the requested parameters after reading them
-        currentGPSStatus.requestedSurveyTime = 0;
-        currentGPSStatus.requestedSurveyAccuracy = 0.0f;
+GPSStatusStruct getGPSStatusSnapshot() {
+    GPSStatusStruct snapshot;
+    portENTER_CRITICAL(&gps_status_mux);
+    snapshot = currentGPSStatus;
+    portEXIT_CRITICAL(&gps_status_mux);
+    return snapshot;
+}
 
-        // Start survey mode
-        if (!startSurveyMode(observationTime, requiredAccuracy)) {
-            error("GPS - Failed to start survey mode");
-        }
-    }
+bool isSurveyInActive() {
+    return getGPSStatusSnapshot().surveyInActive;
+}
 
-    if (!lock_gnss(pdMS_TO_TICKS(1000))) {
-        warning("GPS - Skipping status update; GNSS busy.");
+bool requestStartSurveyMode(uint16_t observationTime, float requiredAccuracy) {
+    if (gps_command_queue == NULL) {
+        error("GPS - Command queue not ready.");
         return false;
     }
 
+    GPSCommand command = {GPSCommandType::START_SURVEY, observationTime, requiredAccuracy};
+    if (xQueueSend(gps_command_queue, &command, pdMS_TO_TICKS(100)) != pdTRUE) {
+        error("GPS - Failed to queue survey start command.");
+        return false;
+    }
+
+    infof("GPS - Queued Survey-in start for %d seconds with accuracy %.2f meters",
+          observationTime, requiredAccuracy);
+    return true;
+}
+
+bool requestStopSurveyMode() {
+    if (gps_command_queue == NULL) {
+        error("GPS - Command queue not ready.");
+        return false;
+    }
+
+    GPSCommand command = {GPSCommandType::STOP_SURVEY, 0, 0.0f};
+    if (xQueueSend(gps_command_queue, &command, pdMS_TO_TICKS(100)) != pdTRUE) {
+        error("GPS - Failed to queue survey stop command.");
+        return false;
+    }
+
+    info("GPS - Queued Survey-in stop");
+    return true;
+}
+
+bool updateGPSStatus() {
     // Read cached GNSS status. Automatic messages are configured with
     // implicitUpdate=false so these getters do not drain Serial1 here.
-    currentGPSStatus.gpsConnected = gpsConnected;
-    currentGPSStatus.status_message = currentGPSStatus.gpsConnected ? "Connected" : "Disconnected";
-    currentGPSStatus.latitude = myGNSS.getHighResLatitude() / 10000000.0 + myGNSS.getHighResLatitudeHp() / 1000000000.0;
-    currentGPSStatus.longitude =
+    gpsStatusOwned.gpsConnected = gpsConnected;
+    gpsStatusOwned.status_message = gpsStatusOwned.gpsConnected ? "Connected" : "Disconnected";
+    gpsStatusOwned.latitude = myGNSS.getHighResLatitude() / 10000000.0 + myGNSS.getHighResLatitudeHp() / 1000000000.0;
+    gpsStatusOwned.longitude =
         myGNSS.getHighResLongitude() / 10000000.0 + myGNSS.getHighResLongitudeHp() / 1000000000.0;
-    currentGPSStatus.altitude = myGNSS.getAltitude() / 1000.0;
-    currentGPSStatus.x = myGNSS.getHighResECEFX() / 10.0 + myGNSS.getHighResECEFXHp() / 100.0;
-    currentGPSStatus.y = myGNSS.getHighResECEFY() / 10.0 + myGNSS.getHighResECEFYHp() / 100.0;
-    currentGPSStatus.z = myGNSS.getHighResECEFZ() / 10.0 + myGNSS.getHighResECEFZHp() / 100.0;
+    gpsStatusOwned.altitude = myGNSS.getAltitude() / 1000.0;
+    gpsStatusOwned.x = myGNSS.getHighResECEFX() / 10.0 + myGNSS.getHighResECEFXHp() / 100.0;
+    gpsStatusOwned.y = myGNSS.getHighResECEFY() / 10.0 + myGNSS.getHighResECEFYHp() / 100.0;
+    gpsStatusOwned.z = myGNSS.getHighResECEFZ() / 10.0 + myGNSS.getHighResECEFZHp() / 100.0;
 
-    currentGPSStatus.surveyInActive = myGNSS.getSurveyInActive();
-    currentGPSStatus.surveyInValid = myGNSS.getSurveyInValid();
-    currentGPSStatus.surveyInObservationTime = myGNSS.getSurveyInObservationTime();
-    currentGPSStatus.surveyInMeanAccuracy = myGNSS.getSurveyInMeanAccuracy();
-    currentGPSStatus.satellites = myGNSS.getSIV();
+    gpsStatusOwned.surveyInActive = myGNSS.getSurveyInActive();
+    gpsStatusOwned.surveyInValid = myGNSS.getSurveyInValid();
+    gpsStatusOwned.surveyInObservationTime = myGNSS.getSurveyInObservationTime();
+    gpsStatusOwned.surveyInMeanAccuracy = myGNSS.getSurveyInMeanAccuracy();
+    gpsStatusOwned.satellites = myGNSS.getSIV();
 
-    if (currentGPSStatus.gpsMode == GPSMode::UNKNOWN) {
-        disable_fast_uart();
-        currentGPSStatus.gpsMode = getGpsMode();
-        enable_fast_uart();
+    if (gpsStatusOwned.gpsMode == GPSMode::UNKNOWN) {
+        gpsStatusOwned.gpsMode = readGpsMode();
     }
-
-    unlock_gnss();
-
-    gpsStatusSting = gpsStatusString(currentGPSStatus);
-    currentGPSStatus.gpsModeString = gpsStatusSting.c_str();
+    gpsStatusOwned.gpsModeString = gpsStatusString(gpsStatusOwned);
 
     // If survey-in mode has just completed, save the position
-    if (prev_survey_in_active && !currentGPSStatus.surveyInActive) {
+    if (survey_save_armed && prev_survey_in_active && !gpsStatusOwned.surveyInActive) {
         info("GPS - Survey-in completed. Saving position...");
         saveSurveyPosition();
+        survey_save_armed = false;
     }
-    prev_survey_in_active = currentGPSStatus.surveyInActive;
+    prev_survey_in_active = gpsStatusOwned.surveyInActive;
+    publishGPSStatus();
     return true;
 }
 
-// Enable fast UART polling for RTCM data processing
-// Call this when GPS is configured and ready to stream RTCM data
-void enable_fast_uart() {
-    fast_uart_handle = true;
-}
-
-// Disable fast UART polling to allow safe GPS configuration
-// Call this before any GPS status queries or configuration changes
-void disable_fast_uart() {
-    fast_uart_handle = false;
-}
-
-bool init_gnss_mutex() {
-    if (gnss_mutex != NULL) {
-        return true;
+void processGPSCommands() {
+    if (gps_command_queue == NULL) {
+        return;
     }
 
-    gnss_mutex = xSemaphoreCreateRecursiveMutex();
-    if (gnss_mutex == NULL) {
-        error("GPS - Failed to create GNSS mutex.");
-        return false;
-    }
-
-    return true;
-}
-
-bool lock_gnss(TickType_t timeout_ticks) {
-    if (gnss_mutex == NULL) {
-        return true;
-    }
-
-    return xSemaphoreTakeRecursive(gnss_mutex, timeout_ticks) == pdTRUE;
-}
-
-void unlock_gnss() {
-    if (gnss_mutex != NULL) {
-        xSemaphoreGiveRecursive(gnss_mutex);
+    GPSCommand command;
+    while (xQueueReceive(gps_command_queue, &command, 0) == pdTRUE) {
+        switch (command.type) {
+            case GPSCommandType::START_SURVEY:
+                if (!executeStartSurveyMode(command.observationTime, command.requiredAccuracy)) {
+                    error("GPS - Failed to start survey mode");
+                }
+                break;
+            case GPSCommandType::STOP_SURVEY:
+                executeStopSurveyMode();
+                break;
+        }
     }
 }
 
-// Update the gpsStatusTask to populate the currentGPSStatus
-[[noreturn]] void gpsStatusTask(void *pvParameters) {
-    for (;;) {
-        updateGPSStatus();
-        delay(1000);  // Wait for 1 second
-    }
-}
-
-[[noreturn]] void gps_uart_check_task(void *pvParameters){
+bool processGPSUart() {
     static unsigned long lastBufferWarning = 0;
     static int maxBufferUsage = 0;
     const int BUFFER_SIZE = 1024 * 8;  // 8KB
     const int WARNING_THRESHOLD = (BUFFER_SIZE * 75) / 100;  // 75% full
 
+    // Check buffer usage before processing
+    int available = Serial1.available();
+
+    // Track maximum buffer usage
+    if (available > maxBufferUsage) {
+        maxBufferUsage = available;
+        debugf("GPS UART buffer peak usage: %d/%d bytes (%.1f%%)",
+               maxBufferUsage, BUFFER_SIZE, (maxBufferUsage * 100.0f) / BUFFER_SIZE);
+    }
+
+    // Warn if buffer is getting full (rate-limited to once per 5 seconds)
+    if (available > WARNING_THRESHOLD) {
+        unsigned long now = millis();
+        if ((unsigned long)(now - lastBufferWarning) > 5000) {
+            lastBufferWarning = now;
+            warningf("GPS UART buffer near overflow: %d/%d bytes (%.1f%% full)",
+                    available, BUFFER_SIZE, (available * 100.0f) / BUFFER_SIZE);
+        }
+    }
+
+    myGNSS.checkUblox();
+    return Serial1.available() > 0;
+}
+
+[[noreturn]] void gpsServiceTask(void *pvParameters){
+    unsigned long lastStatusUpdate = 0;
+
     for (;;) {
-        // Process GNSS data if any connection is active
-        if (fast_uart_handle) {
-            bool hasDataAfterCheck = false;
+        processGPSCommands();
+        bool hasDataAfterCheck = processGPSUart();
 
-            if (lock_gnss(pdMS_TO_TICKS(100))) {
-                // Check buffer usage before processing
-                int available = Serial1.available();
+        const unsigned long now = millis();
+        if ((unsigned long)(now - lastStatusUpdate) >= 1000) {
+            lastStatusUpdate = now;
+            updateGPSStatus();
+        }
 
-                // Track maximum buffer usage
-                if (available > maxBufferUsage) {
-                    maxBufferUsage = available;
-                    debugf("GPS UART buffer peak usage: %d/%d bytes (%.1f%%)",
-                           maxBufferUsage, BUFFER_SIZE, (maxBufferUsage * 100.0f) / BUFFER_SIZE);
-                }
-
-                // Warn if buffer is getting full (rate-limited to once per 5 seconds)
-                if (available > WARNING_THRESHOLD) {
-                    unsigned long now = millis();
-                    if ((unsigned long)(now - lastBufferWarning) > 5000) {
-                        lastBufferWarning = now;
-                        warningf("GPS UART buffer near overflow: %d/%d bytes (%.1f%% full)",
-                                available, BUFFER_SIZE, (available * 100.0f) / BUFFER_SIZE);
-                    }
-                }
-
-                myGNSS.checkUblox();
-                hasDataAfterCheck = Serial1.available() > 0;
-                unlock_gnss();
-            }
-
-            // Always use a minimal delay to allow lower-priority tasks (like loopTask) to run
-            // and feed the watchdog. Even 1 tick (~1ms) is enough to prevent starvation.
-            // At 460800 baud, ~57 bytes arrive per 1ms, but 8KB buffer provides plenty of margin.
-            if (!hasDataAfterCheck) {
-                vTaskDelay(pdMS_TO_TICKS(1));  // 1ms delay when buffer empty
-            } else {
-                // Buffer has data: process multiple iterations quickly, then brief delay
-                // This batches processing while still allowing watchdog to be fed
-                vTaskDelay(1);  // Minimum possible delay (1 FreeRTOS tick)
-            }
+        // Always use a minimal delay to allow lower-priority tasks (like loopTask) to run
+        // and feed the watchdog. Even 1 tick (~1ms) is enough to prevent starvation.
+        // At 460800 baud, ~57 bytes arrive per 1ms, but 8KB buffer provides plenty of margin.
+        if (!hasDataAfterCheck) {
+            vTaskDelay(pdMS_TO_TICKS(1));  // 1ms delay when buffer empty
         } else {
-            vTaskDelay(pdMS_TO_TICKS(10));  // 10ms delay when not in fast mode
+            // Buffer has data: process multiple iterations quickly, then brief delay
+            // This batches processing while still allowing watchdog to be fed
+            vTaskDelay(1);  // Minimum possible delay (1 FreeRTOS tick)
         }
     }
 }
 
-GPSMode getGpsMode() {
+GPSMode readGpsMode() {
     bool response = false;
     UBX_CFG_TMODE3_data_t tmode3_data;
     //auto start_time = millis();
     const int maxRetries = 5;
     const int retryTimeout = 1000; // 1 second timeout
-
-    if (!lock_gnss()) {
-        error("GPS - Failed to lock GNSS for mode query.");
-        return GPSMode::UNKNOWN;
-    }
 
     for (int retry = 0; retry < maxRetries; retry++) {
         response = myGNSS.getSurveyMode(&tmode3_data, retryTimeout);
@@ -510,10 +495,8 @@ GPSMode getGpsMode() {
 
     if (!response) {
         error("GPS - Failed to get Survey-in mode.");
-        unlock_gnss();
         return GPSMode::UNKNOWN;
     }
     //debugf("Getting Survey-in mode took %d ms", millis() - start_time);
-    unlock_gnss();
     return static_cast<GPSMode>(tmode3_data.flags.bits.mode);
 }
